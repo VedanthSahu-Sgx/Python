@@ -1,74 +1,117 @@
-'''
-This is for: Usage of Async in general and in fastAPI
-Async we use when there are multiple waiting activities, like fetch from db or read file or wait for HTTP response
-Multithread we use when there are many tasks which are IO bound but should share data bw each other
-Multi processing we use when there are many processes needed to run and all of them are independent of each other
-'''
-'''
-Async doesnt mean faster code, it means efficient usage of waiting time in IO bound Non-CPU dependent tasks
-GIL: Global Interpreter lock will not allow more than 1 command from python is actively executing.
-This Mutex will prevent any code which can alter the same memory at the same time. 
-'''
 from fastapi import FastAPI, BackgroundTasks
 import httpx
 import asyncio
 
 app = FastAPI()
 
-#Support Functions which can be anything which are used in the code
-async def email(email:str)-> None:
-    print("Email registered:",email)
-async def logger(**log:str) -> None:
-    print("Logger done:" + log)
+# ----------------------------------------------------------------------
+# Helper async functions (email & logger)
+# ----------------------------------------------------------------------
 
-#Endpoint creation, here we can create endpoints for the users to hit. These can be get push put etc.
+async def send_email(email: str) -> None:
+    # Simulate slow I/O task
+    await asyncio.sleep(0.1)
+    print("Email sent to:", email)
+
+async def log_action(user: str, status: str) -> None:
+    await asyncio.sleep(0.1)
+    print(f"Log entry → user={user}, status={status}")
+
+
+# ----------------------------------------------------------------------
+# Endpoint 1 — Demonstrates asyncio.gather (order-preserving concurrency)
+# ----------------------------------------------------------------------
+
 @app.get("/basicSync")
 async def getURLData():
     """
-    Docstring for getURLData and mimic multiple http calls
+    Demonstrates asyncio.gather:
+    - Runs all coroutines concurrently
+    - Returns results in the SAME ORDER they were provided
+    - Best when order matters
     """
     async with httpx.AsyncClient() as client:
-        '''
-    The usage of gather here is to gather all the coroutines and run them in the event loop.
-    This will preserve the order the way we have called the Async functins.
-        '''
-        r1,r2 = await asyncio.gather(
+
+        # These two HTTP requests run concurrently
+        r1, r2 = await asyncio.gather(
             client.get("https://jsonplaceholder.typicode.com/posts"),
             client.get("https://jsonplaceholder.typicode.com/users")
         )
-    return {r1.status_code, r2.status_code}
+
+    return {
+        "posts_status": r1.status_code,
+        "users_status": r2.status_code
+    }
+
+
+# ----------------------------------------------------------------------
+# Endpoint 2 — Demonstrates asyncio.as_completed (fastest-first results),
+# sequential awaits, and background tasks
+# ----------------------------------------------------------------------
 
 @app.get("/multitaskSync")
-async def getdata() -> str:
+async def getdata(background: BackgroundTasks) -> str:
+    """
+    Demonstrates:
+    - asyncio.as_completed → process responses in the order they FINISH
+    - sequential awaits → slower, non-concurrent
+    - BackgroundTasks → run AFTER returning response (not concurrent)
+    """
 
-    #here there is need to get some datafrom and endpoint
     async with httpx.AsyncClient() as client:
-        '''
-        This is asyncio.as_completed()
-        This is as same as gather, which can gather all the coroutines which we need to run in event loop
-        But this does not preserve the order of execution. The fastest response will be yield
-        and we do not wait for the preceeding coroutines, if they are still blocked
-        '''
-        r1, r2 = await asyncio.as_completed(
+
+        # --------------------------------------------------------------
+        # 1. Using asyncio.as_completed (fastest response first)
+        # --------------------------------------------------------------
+
+        coros = [
             client.get("https://jsonplaceholder.typicode.com/posts"),
             client.get("https://jsonplaceholder.typicode.com/users")
+        ]
+
+        results = []
+        # Process whichever finishes first
+        for coro in asyncio.as_completed(coros):
+            resp = await coro
+            results.append(resp)
+
+        r1, r2 = results  # fastest response → r1
+
+        # --------------------------------------------------------------
+        # 2. Sequential awaits (slow, non-concurrent)
+        # --------------------------------------------------------------
+
+        r3 = await client.get("https://jsonplaceholder.typicode.com/posts")
+        r4 = await client.get("https://jsonplaceholder.typicode.com/posts")
+
+        # --------------------------------------------------------------
+        # 3. FastAPI Background Tasks
+        # Runs ONLY after returning response to the user.
+        # NOT threads, NOT asyncio tasks, just deferred execution.
+        # --------------------------------------------------------------
+
+        background.add_task(send_email, "vedanth@gmail.com")
+        background.add_task(log_action, user="vedanth", status="success")
+
+        # --------------------------------------------------------------
+        # Return combined HTTP status codes
+        # --------------------------------------------------------------
+
+        return (
+            f"{r1.status_code} | "
+            f"{r2.status_code} | "
+            f"{r3.status_code} | "
+            f"{r4.status_code}"
         )
 
-        BackgroundTasks.add_task(email("vedanth@gmail.com"), logger(user="vedanth", status="success"))
-        '''
-        The use of backgroundTask is to make another thread where these background tasks will run.
-        There are cases where user seeing response is more important than sending them instant email or logging their activity
-        So in these cases we can simply add them as background task and skip these task and send user instant response
-        This increase user experience. Feels faster and background tasks are run after returning response to the user.
-        '''
 
-        return str(r1.status_code) +str(r2.status_code)
-    
-
-'''
-Here blocked means when the CPU is idle, like read file or wait for API response, 
-In these cases we can do other task as CPU is idle. These cases are where FastAPI is most dominant
-'''
-
-
-
+# ----------------------------------------------------------------------
+# Explanation of async usage:
+#
+# Async = best for I/O-bound tasks (HTTP calls, DB calls, file I/O)
+# Threads = also for I/O-bound tasks, especially when blocking libraries
+# Processes = for CPU-bound tasks (heavy computation)
+#
+# GIL allows only ONE thread to execute Python bytecode at a time, but it
+# releases during I/O, allowing concurrency in I/O tasks.
+# ----------------------------------------------------------------------
