@@ -105,6 +105,7 @@ async def getdata(background: BackgroundTasks) -> str:
         )
 
 
+
 # ----------------------------------------------------------------------
 # Explanation of async usage:
 #
